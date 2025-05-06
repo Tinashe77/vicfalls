@@ -1,4 +1,4 @@
-// Update in src/pages/Runners.jsx
+// src/pages/Runners.jsx - Updated to ensure live data usage
 import { useState, useEffect } from 'react';
 import axios from '../utils/axios';
 import { 
@@ -11,8 +11,9 @@ import {
 } from '@heroicons/react/24/outline';
 import Loading from '../components/Loading';
 import Error from '../components/Error';
-import { listenToRunnerLocation, removeListeners } from '../utils/socket';
+import { listenToRunnerLocation, removeListeners, connectToAdminDashboard } from '../utils/socket';
 import RunnerMapPopup from '../components/RunnerDetailsPopup';
+import { showError, showSuccess } from '../utils/modalManager';
 
 export default function Runners() {
   const [runners, setRunners] = useState([]);
@@ -30,35 +31,66 @@ export default function Runners() {
     search: ''
   });
   const [exportLoading, setExportLoading] = useState(false);
-  // New state for map popup
   const [selectedRunner, setSelectedRunner] = useState(null);
+  const [locationUpdateCounter, setLocationUpdateCounter] = useState(0);
 
   useEffect(() => {
-    fetchRunners();
-
-    // Listen for real-time runner location updates
-    listenToRunnerLocation(updateRunnerLocation);
+    // Connect to WebSocket on component mount
+    connectToAdminDashboard();
     
-    // Clean up listeners when component unmounts
+    // Set up real-time listener for runner location updates
+    listenToRunnerLocation(handleRunnerLocationUpdate);
+    
+    // Clean up listeners on unmount
     return () => {
       removeListeners();
     };
-  }, [pagination.page, filters]);
+  }, []);
 
-  const updateRunnerLocation = (data) => {
-    // Update the runner's location in real-time
+  useEffect(() => {
+    // Fetch runners when page or filters change
+    fetchRunners();
+  }, [pagination.page, filters, locationUpdateCounter]);
+
+  // Handler for real-time runner location updates
+  const handleRunnerLocationUpdate = (data) => {
+    if (!data || !data.runnerId) return;
+    
+    console.log('Received location update for runner:', data.runnerId);
+    
+    // Update runner in state if already in the list
     setRunners(prevRunners => {
-      return prevRunners.map(runner => {
+      const updated = prevRunners.map(runner => {
         if (runner._id === data.runnerId || runner.runnerNumber === data.runnerNumber) {
           return {
             ...runner,
             lastKnownLocation: data.location,
-            status: data.status || runner.status
+            status: data.status || runner.status,
+            lastUpdate: new Date().toISOString() // Add timestamp for last update
           };
         }
         return runner;
       });
+      
+      // If the runner was in our list, return the updated list
+      if (updated.some(r => r._id === data.runnerId || r.runnerNumber === data.runnerNumber)) {
+        return updated;
+      }
+      
+      // Otherwise, don't change the list, but trigger a refetch to get new data
+      setLocationUpdateCounter(prev => prev + 1);
+      return prevRunners;
     });
+    
+    // Also update the selected runner if it's the one being updated
+    if (selectedRunner && (selectedRunner._id === data.runnerId || selectedRunner.runnerNumber === data.runnerNumber)) {
+      setSelectedRunner(prev => ({
+        ...prev,
+        lastKnownLocation: data.location,
+        status: data.status || prev.status,
+        lastUpdate: new Date().toISOString()
+      }));
+    }
   };
 
   const fetchRunners = async () => {
@@ -67,50 +99,43 @@ export default function Runners() {
       const { page, limit } = pagination;
       const { status, category, search } = filters;
       
-      // Build query string
+      // Build query string following the API documentation
       let query = `?page=${page}&limit=${limit}`;
       if (status) query += `&status=${status}`;
       if (category) query += `&category=${category}`;
       if (search) query += `&search=${search}`;
       
-      // Fetch runners from the API endpoint
+      console.log(`Fetching runners with query: ${query}`);
+      
+      // Use axios instance to fetch from the API endpoint
       const response = await axios.get(`/runners${query}`);
       
-      // Use the actual API response
-      setRunners(response.data.data);
-      setPagination({
-        ...pagination,
-        total: response.data.count,
-        totalPages: Math.ceil(response.data.count / pagination.limit)
-      });
-      
-      setError(null);
+      // Check if the response is successful
+      if (response.data?.success) {
+        console.log(`Received ${response.data.data?.length || 0} runners out of ${response.data.count || 0} total`);
+        setRunners(response.data.data || []);
+        setPagination({
+          ...pagination,
+          total: response.data.count || 0,
+          totalPages: Math.ceil((response.data.count || 0) / pagination.limit)
+        });
+        setError(null);
+      } else {
+        throw new Error(response.data?.error || 'Invalid API response format');
+      }
     } catch (err) {
       console.error('Error fetching runners:', err);
-      setError(err.response?.data?.message || 'Failed to fetch runners');
+      setError(err.response?.data?.error || err.message || 'Failed to fetch runners');
       
-      // For development purposes, fall back to mock data if API fails
-      const mockRunners = Array.from({ length: 10 }, (_, i) => ({
-        _id: `runner-${i + 1 + (pagination.page - 1) * 10}`,
-        runnerNumber: `ECO${2023 + i}`,
-        name: `Runner ${i + 1 + (pagination.page - 1) * 10}`,
-        email: `runner${i + 1 + (pagination.page - 1) * 10}@example.com`,
-        phone: `+2637843874${i + 10}`,
-        registeredCategories: i % 3 === 0 ? ['Half Marathon'] : i % 3 === 1 ? ['Full Marathon'] : ['Fun Run'],
-        status: i % 4 === 0 ? 'registered' : i % 4 === 1 ? 'active' : i % 4 === 2 ? 'completed' : 'inactive',
-        lastKnownLocation: i % 2 === 0 ? {
-          type: 'Point',
-          coordinates: [25.8526 + (i * 0.001), -17.9257 - (i * 0.001)]
-        } : null,
-        createdAt: new Date(Date.now() - i * 24 * 60 * 60 * 1000).toISOString()
-      }));
-      
-      setRunners(mockRunners);
+      // Important: Don't use mock data, only show the error
+      setRunners([]);
       setPagination({
         ...pagination,
-        total: 248,
-        totalPages: 25
+        total: 0,
+        totalPages: 0
       });
+      
+      showError('Unable to fetch runners data. Please check your connection and try again.');
     } finally {
       setLoading(false);
     }
@@ -129,6 +154,7 @@ export default function Runners() {
   const handleSearch = (e) => {
     e.preventDefault();
     // The search will be triggered by the useEffect as filters change
+    fetchRunners();
   };
 
   const exportRunners = async () => {
@@ -149,14 +175,12 @@ export default function Runners() {
       link.click();
       link.remove();
       
-      setExportLoading(false);
+      showSuccess('Runners data exported successfully.');
     } catch (err) {
       console.error('Error exporting runners:', err);
-      setError('Failed to export runners');
+      showError('Failed to export runners data. Please try again later.');
+    } finally {
       setExportLoading(false);
-      
-      // Fallback for testing purposes
-      alert('Export functionality would download a CSV file from the /runners/export endpoint');
     }
   };
 
@@ -168,17 +192,23 @@ export default function Runners() {
       }
       
       // Use the API endpoint to update runner status
-      await axios.put(`/runners/${runnerId}`, data);
+      const response = await axios.put(`/runners/${runnerId}`, data);
       
-      // Update the runner in the local state
-      setRunners(prevRunners => 
-        prevRunners.map(runner => 
-          runner._id === runnerId ? { ...runner, status, ...(location && { lastKnownLocation: location }) } : runner
-        )
-      );
+      if (response.data?.success) {
+        // Update the runner in the local state
+        setRunners(prevRunners => 
+          prevRunners.map(runner => 
+            runner._id === runnerId ? { ...runner, status, ...(location && { lastKnownLocation: location }) } : runner
+          )
+        );
+        
+        showSuccess(`Runner status updated to ${status.charAt(0).toUpperCase() + status.slice(1)}`);
+      } else {
+        throw new Error(response.data?.error || 'Invalid update response');
+      }
     } catch (err) {
       console.error('Error updating runner status:', err);
-      setError(err.response?.data?.message || 'Failed to update runner status');
+      showError(err.response?.data?.error || err.message || 'Failed to update runner status');
     }
   };
 
@@ -203,8 +233,7 @@ export default function Runners() {
   };
 
   if (loading && pagination.page === 1) return <Loading />;
-  if (error) return <Error message={error} />;
-
+  
   return (
     <div className="space-y-6">
       <div className="sm:flex sm:items-center sm:justify-between">
@@ -301,6 +330,9 @@ export default function Runners() {
         </form>
       </div>
 
+      {/* Error Display */}
+      {error && <Error message={error} onRetry={fetchRunners} />}
+
       {/* Runners Table */}
       <div className="bg-white shadow rounded-lg overflow-hidden">
         <div className="overflow-x-auto">
@@ -355,7 +387,7 @@ export default function Runners() {
               ) : runners.length === 0 ? (
                 <tr>
                   <td colSpan="6" className="px-6 py-4 text-center text-gray-500">
-                    No runners found
+                    No runners found matching the current filters
                   </td>
                 </tr>
               ) : (
@@ -372,14 +404,18 @@ export default function Runners() {
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
                       <div className="space-y-1">
-                        {runner.registeredCategories.map((category) => (
-                          <span
-                            key={category}
-                            className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800"
-                          >
-                            {category}
-                          </span>
-                        ))}
+                        {runner.registeredCategories && runner.registeredCategories.length > 0 ? (
+                          runner.registeredCategories.map((category) => (
+                            <span
+                              key={category}
+                              className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800"
+                            >
+                              {category}
+                            </span>
+                          ))
+                        ) : (
+                          <span className="text-sm text-gray-500">No categories</span>
+                        )}
                       </div>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
@@ -388,7 +424,7 @@ export default function Runners() {
                           runner.status
                         )}`}
                       >
-                        {runner.status.charAt(0).toUpperCase() + runner.status.slice(1)}
+                        {runner.status ? runner.status.charAt(0).toUpperCase() + runner.status.slice(1) : 'Unknown'}
                       </span>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
@@ -404,11 +440,15 @@ export default function Runners() {
                       )}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                      {new Date(runner.createdAt).toLocaleDateString('en-US', {
-                        year: 'numeric',
-                        month: 'short',
-                        day: 'numeric'
-                      })}
+                      {runner.createdAt ? (
+                        new Date(runner.createdAt).toLocaleDateString('en-US', {
+                          year: 'numeric',
+                          month: 'short',
+                          day: 'numeric'
+                        })
+                      ) : (
+                        'Unknown'
+                      )}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
                       <button
@@ -529,6 +569,8 @@ export default function Runners() {
                 </nav>
               </div>
             </div>
+            
+            {/* Mobile pagination */}
             <div className="flex items-center justify-between sm:hidden">
               <button
                 onClick={() => handlePageChange(pagination.page - 1)}
