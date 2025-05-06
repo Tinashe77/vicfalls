@@ -1,5 +1,5 @@
-// src/pages/Races.jsx - Updated to consume API data properly
-import { useState, useEffect } from 'react';
+// src/pages/Races.jsx - Updated to use live data and fix map visualization
+import { useState, useEffect, useRef } from 'react';
 import axios from '../utils/axios';
 import { 
   ClockIcon,
@@ -21,6 +21,191 @@ import {
 } from '../utils/socket';
 import { showInfo, showError, showSuccess, showConfirm } from '../utils/modalManager';
 
+// Map component for race visualization
+const RaceMap = ({ trackingData, checkpoints, routeData }) => {
+  const mapRef = useRef(null);
+  const mapInstanceRef = useRef(null);
+  const [mapLoaded, setMapLoaded] = useState(false);
+
+  useEffect(() => {
+    // Load Leaflet library dynamically
+    const loadLeaflet = async () => {
+      if (typeof window.L === 'undefined') {
+        // Load Leaflet CSS
+        const linkElement = document.createElement('link');
+        linkElement.rel = 'stylesheet';
+        linkElement.href = 'https://unpkg.com/leaflet@1.9.3/dist/leaflet.css';
+        document.head.appendChild(linkElement);
+        
+        // Load Leaflet JS
+        const scriptElement = document.createElement('script');
+        scriptElement.src = 'https://unpkg.com/leaflet@1.9.3/dist/leaflet.js';
+        scriptElement.async = true;
+        
+        scriptElement.onload = () => {
+          setMapLoaded(true);
+        };
+        
+        document.body.appendChild(scriptElement);
+        
+        return () => {
+          if (document.head.contains(linkElement)) {
+            document.head.removeChild(linkElement);
+          }
+          if (document.body.contains(scriptElement)) {
+            document.body.removeChild(scriptElement);
+          }
+        };
+      } else {
+        setMapLoaded(true);
+      }
+    };
+    
+    loadLeaflet();
+  }, []);
+
+  useEffect(() => {
+    if (!mapLoaded || !mapRef.current) return;
+    
+    // Initialize map
+    const initMap = () => {
+      // Clear any existing map
+      if (mapInstanceRef.current) {
+        mapInstanceRef.current.remove();
+      }
+      
+      // Default to Victoria Falls location if no tracking data
+      let centerCoords = [-17.9257, 25.8526]; // Victoria Falls
+      let boundsPoints = [];
+      
+      // Create map instance
+      const L = window.L;
+      const map = L.map(mapRef.current, {
+        zoomControl: true,
+        attributionControl: true
+      });
+      
+      // Add tile layer
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+      }).addTo(map);
+      
+      // Add tracking data points if available
+      if (trackingData && trackingData.length > 0) {
+        // Create a polyline for the runner's path
+        const pathPoints = trackingData.map(point => [
+          point.location.coordinates[1], 
+          point.location.coordinates[0]
+        ]);
+        
+        boundsPoints = [...boundsPoints, ...pathPoints];
+        
+        // Draw the path
+        const pathLine = L.polyline(pathPoints, {
+          color: '#3B82F6',
+          weight: 4,
+          opacity: 0.8
+        }).addTo(map);
+        
+        // Add markers for start and current position
+        const startPoint = pathPoints[0];
+        const endPoint = pathPoints[pathPoints.length - 1];
+        
+        // Start marker
+        L.marker(startPoint, {
+          icon: L.divIcon({
+            className: 'custom-div-icon',
+            html: `<div style="background-color: #2563EB; width: 12px; height: 12px; border-radius: 50%; border: 2px solid white;"></div>`,
+            iconSize: [12, 12],
+            iconAnchor: [6, 6]
+          })
+        }).addTo(map)
+        .bindPopup('Start point')
+        .openPopup();
+        
+        // Current position marker
+        L.marker(endPoint, {
+          icon: L.divIcon({
+            className: 'custom-div-icon',
+            html: `<div style="background-color: #DC2626; width: 16px; height: 16px; border-radius: 50%; border: 2px solid white;"></div>`,
+            iconSize: [16, 16],
+            iconAnchor: [8, 8]
+          })
+        }).addTo(map)
+        .bindPopup('Current position')
+        .openPopup();
+        
+        // Update center coordinates to the last tracking point
+        centerCoords = endPoint;
+      }
+      
+      // Add checkpoint markers if available
+      if (checkpoints && checkpoints.length > 0) {
+        checkpoints.forEach((checkpoint, index) => {
+          if (checkpoint.location && checkpoint.location.coordinates) {
+            const cpCoords = [
+              checkpoint.location.coordinates[1],
+              checkpoint.location.coordinates[0]
+            ];
+            
+            boundsPoints.push(cpCoords);
+            
+            L.marker(cpCoords, {
+              icon: L.divIcon({
+                className: 'custom-div-icon',
+                html: `<div style="background-color: #059669; width: 14px; height: 14px; border-radius: 50%; border: 2px solid white;"></div>`,
+                iconSize: [14, 14],
+                iconAnchor: [7, 7]
+              })
+            }).addTo(map)
+            .bindPopup(`Checkpoint ${index + 1}: ${checkpoint.name}`);
+          }
+        });
+      }
+      
+      // Draw route GPX if available (simplified example)
+      if (routeData && routeData.length > 0) {
+        const routePoints = routeData.map(point => [point.lat, point.lng]);
+        boundsPoints = [...boundsPoints, ...routePoints];
+        
+        L.polyline(routePoints, {
+          color: '#9CA3AF',
+          weight: 3,
+          opacity: 0.6,
+          dashArray: '5, 5'
+        }).addTo(map);
+      }
+      
+      // Set view or fit bounds
+      if (boundsPoints.length > 1) {
+        map.fitBounds(boundsPoints, {
+          padding: [50, 50]
+        });
+      } else {
+        map.setView(centerCoords, 14);
+      }
+      
+      // Store map instance for cleanup
+      mapInstanceRef.current = map;
+    };
+    
+    // Initialize the map
+    initMap();
+    
+    // Cleanup on unmount
+    return () => {
+      if (mapInstanceRef.current) {
+        mapInstanceRef.current.remove();
+        mapInstanceRef.current = null;
+      }
+    };
+  }, [mapLoaded, trackingData, checkpoints, routeData]);
+
+  return (
+    <div ref={mapRef} className="w-full h-full" style={{ minHeight: '400px' }}></div>
+  );
+};
+
 export default function Races() {
   const [races, setRaces] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -33,6 +218,9 @@ export default function Races() {
   });
   const [certificateLoading, setCertificateLoading] = useState(false);
   const [refreshLoading, setRefreshLoading] = useState(false);
+  // Add state for route visualization
+  const [routeData, setRouteData] = useState(null);
+  const [fetchingRoute, setFetchingRoute] = useState(false);
 
   useEffect(() => {
     // Connect to WebSocket for real-time updates
@@ -54,21 +242,29 @@ export default function Races() {
 
   // Handler for real-time runner location updates
   const handleRunnerLocationUpdate = (data) => {
+    if (!data || !data.raceId) return;
+    
+    console.log('Received location update for race:', data.raceId);
+    
     setRaces(prevRaces => {
       return prevRaces.map(race => {
         if (race._id === data.raceId) {
+          // Create new tracking point
+          const newTrackingPoint = {
+            timestamp: data.timestamp || new Date().toISOString(),
+            location: data.location,
+            elevation: data.elevation || 0,
+            speed: data.speed || 0
+          };
+          
           // Update the race with the new tracking data
           return {
             ...race,
             trackingData: [
               ...(race.trackingData || []),
-              {
-                timestamp: data.timestamp,
-                location: data.location,
-                elevation: data.elevation,
-                speed: data.speed
-              }
-            ]
+              newTrackingPoint
+            ],
+            lastUpdate: new Date().toISOString()
           };
         }
         return race;
@@ -78,17 +274,20 @@ export default function Races() {
     // If we're viewing a race detail and it's the updated race, update the selected race
     if (selectedRace && selectedRace._id === data.raceId) {
       setSelectedRace(prevRace => {
+        const newTrackingPoint = {
+          timestamp: data.timestamp || new Date().toISOString(),
+          location: data.location,
+          elevation: data.elevation || 0,
+          speed: data.speed || 0
+        };
+        
         return {
           ...prevRace,
           trackingData: [
             ...(prevRace.trackingData || []),
-            {
-              timestamp: data.timestamp,
-              location: data.location,
-              elevation: data.elevation,
-              speed: data.speed
-            }
-          ]
+            newTrackingPoint
+          ],
+          lastUpdate: new Date().toISOString()
         };
       });
     }
@@ -96,6 +295,10 @@ export default function Races() {
 
   // Handler for race completion events
   const handleRaceCompleted = (data) => {
+    if (!data || !data.raceId) return;
+    
+    console.log('Received race completion for race:', data.raceId);
+    
     setRaces(prevRaces => {
       return prevRaces.map(race => {
         if (race._id === data.raceId) {
@@ -103,7 +306,7 @@ export default function Races() {
           return {
             ...race,
             status: 'completed',
-            finishTime: data.finishTime,
+            finishTime: data.finishTime || new Date().toISOString(),
             completionTime: data.completionTime,
             averagePace: data.averagePace
           };
@@ -118,14 +321,14 @@ export default function Races() {
         return {
           ...prevRace,
           status: 'completed',
-          finishTime: data.finishTime,
+          finishTime: data.finishTime || new Date().toISOString(),
           completionTime: data.completionTime,
           averagePace: data.averagePace
         };
       });
 
       // Show notification about race completion
-      showSuccess(`Race completed by ${selectedRace.runner.name} in ${formatTime(data.completionTime)}!`);
+      showSuccess(`Race completed by ${selectedRace.runner?.name} in ${formatTime(data.completionTime)}!`);
     }
   };
 
@@ -142,11 +345,14 @@ export default function Races() {
         query = `?${params.toString()}`;
       }
       
+      console.log('Fetching races with query:', query);
+      
       // Fetch races from the API endpoint
       const response = await axios.get(`/races${query}`);
       
       // Check if the response is successful
       if (response.data && response.data.success) {
+        console.log(`Fetched ${response.data.data?.length || 0} races`);
         setRaces(response.data.data || []);
         setError(null);
       } else {
@@ -183,7 +389,16 @@ export default function Races() {
       const response = await axios.get(`/races/${race._id}`);
       
       if (response.data && response.data.success) {
-        setSelectedRace(response.data.data);
+        const raceData = response.data.data;
+        setSelectedRace(raceData);
+        
+        // If there's a route associated, fetch route GPX data if available
+        if (raceData.route && raceData.route._id && raceData.route.gpxFile) {
+          fetchRouteData(raceData.route._id);
+        } else {
+          setRouteData(null);
+        }
+        
         setView('detail');
       } else {
         throw new Error(response.data?.error || 'Invalid API response format');
@@ -192,20 +407,48 @@ export default function Races() {
       console.error('Error fetching race details:', err);
       showError('Failed to load race details. Please try again.');
       
-      // Fall back to the summary data if API fails
+      // Still set the race data we have
       setSelectedRace(race);
+      setRouteData(null);
       setView('detail');
     } finally {
       setLoading(false);
     }
   };
 
+  // Function to fetch route GPX data
+  const fetchRouteData = async (routeId) => {
+    try {
+      setFetchingRoute(true);
+      
+      // Make request to get route GPX data
+      const response = await axios.get(`/routes/${routeId}/gpx`);
+      
+      if (response.data && response.data.success) {
+        // Parse GPX data and convert to usable format for map
+        // In a real app, you'd use a GPX parser here
+        setRouteData(response.data.data || []);
+      } else {
+        console.warn('No GPX data available for route');
+        setRouteData(null);
+      }
+    } catch (err) {
+      console.error('Error fetching route GPX data:', err);
+      setRouteData(null);
+    } finally {
+      setFetchingRoute(false);
+    }
+  };
+
   const goBackToList = () => {
     setView('list');
     setSelectedRace(null);
+    setRouteData(null);
   };
 
   const formatDateTime = (dateString) => {
+    if (!dateString) return 'N/A';
+    
     return new Date(dateString).toLocaleString('en-US', {
       year: 'numeric',
       month: 'short',
@@ -216,6 +459,8 @@ export default function Races() {
   };
 
   const formatTime = (seconds) => {
+    if (!seconds && seconds !== 0) return 'N/A';
+    
     const hours = Math.floor(seconds / 3600);
     const minutes = Math.floor((seconds % 3600) / 60);
     const remainingSeconds = seconds % 60;
@@ -224,6 +469,8 @@ export default function Races() {
   };
 
   const formatPace = (pace) => {
+    if (!pace && pace !== 0) return 'N/A';
+    
     const minutes = Math.floor(pace);
     const seconds = Math.round((pace - minutes) * 60);
     return `${minutes}:${seconds.toString().padStart(2, '0')}/km`;
@@ -279,15 +526,22 @@ export default function Races() {
       const response = await axios.get(`/races/${raceId}`);
       
       if (response.data && response.data.success) {
+        const freshData = response.data.data;
+        
         // Update selected race if we're in detail view
         if (view === 'detail' && selectedRace?._id === raceId) {
-          setSelectedRace(response.data.data);
+          setSelectedRace(freshData);
+          
+          // If there's a route associated, fetch route GPX data if available
+          if (freshData.route && freshData.route._id && freshData.route.gpxFile) {
+            fetchRouteData(freshData.route._id);
+          }
         }
         
         // Update race in the list
         setRaces(prevRaces => {
           return prevRaces.map(race => 
-            race._id === raceId ? response.data.data : race
+            race._id === raceId ? freshData : race
           );
         });
         
@@ -363,6 +617,9 @@ export default function Races() {
         </div>
       </div>
 
+      {/* Error message if any */}
+      {error && <Error message={error} onRetry={fetchRaces} />}
+
       {/* Races List */}
       <div className="bg-white shadow overflow-hidden sm:rounded-md">
         <ul className="divide-y divide-gray-200">
@@ -372,7 +629,7 @@ export default function Races() {
             </li>
           ) : races.length === 0 ? (
             <li className="px-6 py-4 text-center text-gray-500">
-              No races found
+              No races found matching your filters
             </li>
           ) : (
             races.map((race) => (
@@ -381,16 +638,16 @@ export default function Races() {
                   <div className="min-w-0 flex-1 sm:flex sm:items-center sm:justify-between">
                     <div>
                       <div className="flex text-sm">
-                        <p className="font-medium text-primary-600 truncate">{race.runner.name}</p>
+                        <p className="font-medium text-primary-600 truncate">{race.runner?.name || 'Unknown Runner'}</p>
                         <p className="ml-1 flex-shrink-0 font-normal text-gray-500">
-                          ({race.runner.runnerNumber})
+                          ({race.runner?.runnerNumber || 'No Number'})
                         </p>
                       </div>
                       <div className="mt-2 flex">
                         <div className="flex items-center text-sm text-gray-500">
                           <FlagIcon className="flex-shrink-0 mr-1.5 h-5 w-5 text-gray-400" />
                           <p>
-                            {race.route.name} <span className="mx-1">•</span> {race.category}
+                            {race.route?.name || 'Unknown Route'} <span className="mx-1">•</span> {race.category || 'Unknown Category'}
                           </p>
                         </div>
                       </div>
@@ -404,7 +661,7 @@ export default function Races() {
                         >
                           {race.status === 'in-progress' ? 'In Progress' : 
                            race.status === 'completed' ? 'Completed' : 
-                           race.status.charAt(0).toUpperCase() + race.status.slice(1)}
+                           race.status ? race.status.charAt(0).toUpperCase() + race.status.slice(1) : 'Unknown'}
                         </span>
                         <div className="text-sm text-gray-500">
                           {race.status === 'completed' ? (
@@ -451,9 +708,9 @@ export default function Races() {
               <ChevronLeftIcon className="mr-1 h-5 w-5" aria-hidden="true" />
               Back to races
             </button>
-            <h1 className="mt-2 text-2xl font-semibold text-gray-900">{selectedRace.route.name}</h1>
+            <h1 className="mt-2 text-2xl font-semibold text-gray-900">{selectedRace.route?.name || 'Race Details'}</h1>
             <p className="mt-1 text-sm text-gray-500">
-              {selectedRace.category} • {selectedRace.runner.name} ({selectedRace.runner.runnerNumber})
+              {selectedRace.category || 'Unknown Category'} • {selectedRace.runner?.name || 'Unknown Runner'} ({selectedRace.runner?.runnerNumber || 'No Number'})
             </p>
           </div>
           <div className="mt-4 flex space-x-3 sm:mt-0">
@@ -516,7 +773,7 @@ export default function Races() {
               >
                 {selectedRace.status === 'in-progress' ? 'In Progress' : 
                  selectedRace.status === 'completed' ? 'Completed' : 
-                 selectedRace.status.charAt(0).toUpperCase() + selectedRace.status.slice(1)}
+                 selectedRace.status ? selectedRace.status.charAt(0).toUpperCase() + selectedRace.status.slice(1) : 'Unknown'}
               </span>
             </div>
             <div>
@@ -554,6 +811,40 @@ export default function Races() {
                   <p className="mt-1 text-sm text-gray-900">{formatDateTime(lastPosition.timestamp)}</p>
                 </div>
               </>
+            )}
+          </div>
+        </div>
+
+        {/* Map Visualization - Now using the actual RaceMap component */}
+        <div className="bg-white shadow rounded-lg overflow-hidden">
+          <div className="px-6 py-4 border-b border-gray-200">
+            <h2 className="text-lg font-medium text-gray-900">Map Visualization</h2>
+          </div>
+          <div className="p-0 h-96">
+            {fetchingRoute ? (
+              <div className="h-full flex items-center justify-center bg-gray-100">
+                <div className="flex flex-col items-center">
+                  <svg className="animate-spin h-10 w-10 text-primary-500 mb-2" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                  </svg>
+                  <p className="text-sm text-gray-600">Loading route data...</p>
+                </div>
+              </div>
+            ) : selectedRace.trackingData && selectedRace.trackingData.length > 0 ? (
+              <RaceMap 
+                trackingData={selectedRace.trackingData} 
+                checkpoints={selectedRace.checkpointTimes?.map(c => c.checkpoint) || []} 
+                routeData={routeData}
+              />
+            ) : (
+              <div className="h-full flex items-center justify-center bg-gray-100">
+                <div className="text-center text-gray-500">
+                  <MapPinIcon className="mx-auto h-12 w-12 text-gray-400" />
+                  <p className="mt-2 text-sm font-medium">No tracking data available for this race</p>
+                  <p className="text-xs">Tracking data will appear here once the runner starts moving</p>
+                </div>
+              </div>
             )}
           </div>
         </div>
@@ -623,10 +914,10 @@ export default function Races() {
                         {point.location.coordinates[1].toFixed(4)}, {point.location.coordinates[0].toFixed(4)}
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                        {point.elevation} m
+                        {point.elevation || 0} m
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                        {point.speed.toFixed(1)} km/h
+                        {(point.speed || 0).toFixed(1)} km/h
                       </td>
                     </tr>
                   ))
@@ -639,20 +930,6 @@ export default function Races() {
                 )}
               </tbody>
             </table>
-          </div>
-        </div>
-
-        {/* Map Visualization */}
-        <div className="bg-white shadow rounded-lg overflow-hidden">
-          <div className="px-6 py-4 border-b border-gray-200">
-            <h2 className="text-lg font-medium text-gray-900">Map Visualization</h2>
-          </div>
-          <div className="p-6 flex items-center justify-center bg-gray-100 h-96">
-            <div className="text-center text-gray-500">
-              <MapPinIcon className="mx-auto h-12 w-12 text-gray-400" />
-              <p className="mt-2 text-sm font-medium">Map visualization would be displayed here</p>
-              <p className="text-xs">In a real application, this would show a map with the runner's path and current location</p>
-            </div>
           </div>
         </div>
       </div>
